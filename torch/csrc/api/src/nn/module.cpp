@@ -13,6 +13,14 @@
 #include <string>
 #include <typeinfo>
 
+// yf225 TODO: add thorough tests for this change, especially for save/load
+// Test 1: parameters() / named_parameters() / buffers() / named_buffers() don't return undefined tensors (use Linear and BatchNorm1d as example)
+// Test 2: parameters() / named_parameters() / buffers() / named_buffers() give correct result when recurse=false, both for has-undefined and no-undefined cases
+// yf225 TODO: modify parameters() / named_parameters() / buffers() / named_buffers() to exactly mirror the Python version!!! And then add test for it!!
+// yf225 TODO: also double check that Python version save/load doesn't serialize/deserialize the None tensors
+// and double check our other changes in this PR as well!
+// yf225 TODO: search for other use sites of `parameters_` and `buffers_` -- should we change them as well???
+
 namespace torch {
 namespace nn {
 namespace {
@@ -33,12 +41,13 @@ std::string join_name(const std::string& name_prefix, const std::string& name) {
   return full_name;
 }
 
-void extend(
+void extend_skip_undefined(
     std::vector<Tensor>& vector,
     const OrderedDict<std::string, Tensor>& dict) {
-  vector.reserve(vector.size() + dict.size());
   for (const auto& item : dict) {
-    vector.push_back(item.value());
+    if (item.value()->defined()) {
+      vector.push_back(item.value());
+    }
   }
 }
 } // namespace
@@ -141,22 +150,24 @@ void Module::apply(
 }
 
 std::vector<Tensor> Module::parameters(bool recurse) const {
-  if (!recurse) {
-    return parameters_.values();
-  }
+  // yf225 TODO: we can't just remove the base case!!!! Because the general case is a recursion!
+  // if (!recurse) {
+  //   return parameters_;
+  // }
   std::vector<Tensor> result;
   apply(
-      [&result](const Module& module) { extend(result, module.parameters_); });
+      [&result](const Module& module) { extend_skip_undefined(result, module.parameters_); });
   return result;
 }
 
 OrderedDict<std::string, Tensor> Module::named_parameters(bool recurse) const {
-  if (!recurse) {
-    return parameters_;
-  }
+  // yf225 TODO: we can't just remove the base case!!!! Because the general case is a recursion!
+  // if (!recurse) {
+  //   return parameters_;
+  // }
   OrderedDict<std::string, Tensor> result;
   apply([&result](const std::string& name, const Module& module) {
-    for (const auto& parameter : module.parameters_) {
+    for (const auto& parameter : module.named_parameters(/*recurse=*/false)) {
       result.insert(join_name(name, parameter.key()), parameter.value());
     }
   });
@@ -164,20 +175,23 @@ OrderedDict<std::string, Tensor> Module::named_parameters(bool recurse) const {
 }
 
 std::vector<Tensor> Module::buffers(bool recurse) const {
-  if (!recurse) {
-    return buffers_.values();
-  }
+  // yf225 TODO: we can't just remove the base case!!!! Because the general case is a recursion!
+  // if (!recurse) {
+  //   return buffers_;
+  // }
   std::vector<Tensor> result;
-  apply([&result](const Module& module) { extend(result, module.buffers_); });
+  apply([&result](const Module& module) { extend_skip_undefined(result, module.buffers_); });
   return result;
 }
+
 OrderedDict<std::string, Tensor> Module::named_buffers(bool recurse) const {
-  if (!recurse) {
-    return buffers_;
-  }
+  // yf225 TODO: we can't just remove the base case!!!! Because the general case is a recursion!
+  // if (!recurse) {
+  //   return buffers_;
+  // }
   OrderedDict<std::string, Tensor> result;
   apply([&result](const std::string& name, const Module& module) {
-    for (const auto& buffer : module.buffers_) {
+    for (const auto& buffer : module.named_buffers(/*recurse=*/false)) {
       result.insert(join_name(name, buffer.key()), buffer.value());
     }
   });
@@ -261,7 +275,7 @@ void Module::zero_grad() {
   for (auto& child : children_) {
     child.value()->zero_grad();
   }
-  for (auto& parameter : parameters_) {
+  for (auto& parameter : named_parameters(/*recurse=*/false)) {
     auto& grad = parameter->grad();
     if (grad.defined()) {
       grad = grad.detach();
@@ -271,10 +285,10 @@ void Module::zero_grad() {
 }
 
 void Module::save(serialize::OutputArchive& archive) const {
-  for (const auto& parameter : parameters_) {
+  for (const auto& parameter : named_parameters(/*recurse=*/false)) {
     archive.write(parameter.key(), parameter.value());
   }
-  for (const auto& buffer : buffers_) {
+  for (const auto& buffer : named_buffers(/*recurse=*/false)) {
     archive.write(buffer.key(), buffer.value(), /*is_buffer=*/true);
   }
   for (const auto& child : children_) {
@@ -287,10 +301,10 @@ void Module::save(serialize::OutputArchive& archive) const {
 }
 
 void Module::load(serialize::InputArchive& archive) {
-  for (auto& parameter : parameters_) {
+  for (auto& parameter : named_parameters(/*recurse=*/false)) {
     archive.read(parameter.key(), parameter.value());
   }
-  for (auto& buffer : buffers_) {
+  for (auto& buffer : named_buffers(/*recurse=*/false)) {
     archive.read(buffer.key(), buffer.value(), /*is_buffer=*/true);
   }
   for (const auto& child : children_) {
